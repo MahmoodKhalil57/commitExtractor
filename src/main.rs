@@ -1,7 +1,7 @@
 extern crate git2;
 extern crate rusqlite;
 
-use git2::{Commit, Oid, Repository};
+use git2::{Commit, Oid, Reference, Repository};
 use rusqlite::{params, Connection, Result};
 use std::env;
 use std::fs;
@@ -13,6 +13,11 @@ struct CommitDetails {
     date: i64,
     message: String,
     parents: Vec<Oid>,
+}
+struct RefDetails {
+    name: String,
+    id: String,
+    kind: String,
 }
 
 fn main() {
@@ -38,6 +43,10 @@ fn main() {
 
     println!("Getting Commit Details...");
     get_commits_detail_array(&mut conn, &repo);
+    println!("Done!");
+
+    println!("Getting Ref Details...");
+    get_ref_details(&mut conn, &repo);
     println!("Done!");
 }
 
@@ -143,6 +152,65 @@ fn batch_insert_commits(conn: &mut Connection, commits: &Vec<CommitDetails>) -> 
             )
             .expect("Failed to insert commit relation.");
         }
+        tx.commit()?; // Commit the transaction
+    }
+
+    Ok(())
+}
+
+fn get_ref_details(conn: &mut Connection, repo: &Repository) {
+    let all_references: Vec<_> = repo
+        .references()
+        .expect("Failed to get references.")
+        .collect();
+
+    for chunk in all_references.chunks(50) {
+        let mut chunk_refs = Vec::new();
+
+        for reference_result in chunk {
+            match reference_result {
+                Ok(reference) => {
+                    let formatted_refs = extract_ref_details(&reference);
+                    chunk_refs.push(formatted_refs);
+                }
+                Err(e) => println!("Failed to process reference: {}", e),
+            }
+        }
+        batch_insert_refs(conn, &chunk_refs).expect("Failed to insert references.");
+    }
+}
+
+fn extract_ref_details(reference: &Reference) -> RefDetails {
+    let name = reference.name().unwrap_or("").to_string();
+    let id = match reference.target() {
+        Some(target) => target.to_string(),
+        None => String::from("Unknown"),
+    };
+    let kind = match reference.kind() {
+        Some(git2::ReferenceType::Direct) => "Direct",
+        Some(git2::ReferenceType::Symbolic) => "Symbolic",
+        None => "Unknown",
+    }
+    .to_string();
+
+    return RefDetails { id, name, kind };
+}
+
+fn batch_insert_refs(conn: &mut Connection, refs: &Vec<RefDetails>) -> Result<()> {
+    let chunk_size = 50;
+
+    let insert_sql = "INSERT INTO ref_details (id, name, kind) VALUES (?1, ?2, ?3)";
+
+    for chunk in refs.chunks(chunk_size) {
+        let tx = conn.transaction()?; // Begin a new transaction
+
+        for reference in chunk {
+            tx.execute(
+                insert_sql,
+                params![&reference.id, &reference.name, reference.kind,],
+            )?;
+        }
+
         tx.commit()?; // Commit the transaction
     }
 
